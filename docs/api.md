@@ -80,6 +80,10 @@ versions they do not support.
 | `ExecutionValidationError` | Invalid transaction wiring or invalid durable state. | Not retryable; fix code or persisted state. |
 | `DefinitionIdentityError` | Missing, invalid, changed, unidentified, or incompatible automation definition identity. | Not retryable with the current definition; supply the exact compatible identity or start a new transaction. |
 | `TransactionFenceError` | A durable queue checkpoint has a stale claim token or transaction revision. | Not retryable by that worker; stop and reacquire the queue item. |
+| `SnapshotError` | Base failure for an offline consistency snapshot or restore. | A failed snapshot never publishes a directory and leaves existing filesystem destinations untouched; a failed restore removes only the new target files it created. |
+| `SnapshotBusyError` | A source database could not be read or backed up because its write lock was held. | Retry after the competing transaction ends; no partial snapshot is published. |
+| `SnapshotCancelledError` | A snapshot was cancelled cooperatively through its event before publication. | No partial snapshot is published. |
+| `SnapshotVerificationError` | A snapshot or restored database failed integrity, checksum, schema, foreign-key, or lease verification. | A snapshot failure publishes nothing; a restore failure removes only newly created target files. |
 
 Unhandled exceptions from step code are recorded as system failures.
 `MemoryError` is not masked by checkpoint errors.
@@ -355,6 +359,45 @@ and attempt **claim tokens**. Treat them as sensitive; the
 payloads fail item decoding without quarantine or partial results; attempts and
 poison events remain independently inspectable. No attempt history is invented
 for pre-tracking rows. Storage errors propagate without repair or migration.
+
+## Offline Consistency Snapshots
+
+Transaction truth and queue truth live in two separate SQLite files, so
+copying them independently cannot produce a recoverable pair when a retry or
+lease renewal commits between the two copies. The snapshot API freezes both
+databases at one logical point in time and verifies every copy before
+publication.
+
+| Symbol | Purpose | Side effects |
+| --- | --- | --- |
+| `create_consistency_snapshot(*, transaction_db_path, queue_db_path, output_dir, cancel_event=None)` | Back up both databases to one new snapshot directory using the SQLite online backup mechanism. | Acquires a write sentry and a pinned read transaction on each source without writing any rows, copies both databases through the backup API, verifies them, and atomically publishes the directory. Never modifies the source databases; a failure removes all staging files and publishes nothing. |
+| `restore_consistency_snapshot(*, snapshot_dir, transaction_target_path, queue_target_path)` | Restore a published snapshot to two explicit new paths. | Reads the snapshot directory only, verifies its completion marker, manifest, and digests before writing, copies to new target files, then reopens each target to verify schema, row counts, foreign keys, and queue lease state. Never overwrites an existing target and never touches the original databases. |
+| `SnapshotResult` | Published snapshot location, format version, creation timestamp, and one `SnapshotDatabaseResult` per database. | Frozen, JSON-safe fact object; no I/O. |
+| `SnapshotDatabaseResult` | One verified database copy: component, source and snapshot file names, schema version, journal mode, SHA-256, size, table row counts, foreign-key violation count, and integrity result. | Frozen fact object; no I/O. |
+| `SnapshotRestoreResult` | Snapshot location, restore timestamp, and one `RestoredDatabase` per new target. | Frozen fact object; no I/O. |
+| `RestoredDatabase` | One verified restored target including its path, verification facts, and the captured queue `QueueLeaseState` when applicable. | Frozen fact object; no I/O. |
+| `QueueLeaseState` | Queue lease facts captured for audit: in-progress items, complete claims, incomplete claims, and open attempts. | Frozen fact object; no I/O. |
+
+For each source the snapshot holds two connections for the duration of the
+window: a writable sentry parked in `BEGIN IMMEDIATE` whose RESERVED lock
+blocks other connections from starting a write transaction, and a separate
+read-only connection whose pinned read transaction is copied by the online
+backup API. With a sentry held on both files before either copy starts, no
+writer commit can land on either database while the pair is assembled, in both
+rollback-journal and WAL modes. The sentries write no rows and are released by
+rollback. Published copies are normalized to rollback-journal mode so a
+snapshot directory is self-contained without `-wal` or `-shm` sidecars.
+
+The output directory must not already exist. The directory contains the two
+database files, a versioned `snapshot-manifest.json` (format version, creation
+timestamp, framework version, per-file SHA-256 digests, sizes, schema
+versions, row counts, foreign-key and lease facts), and a `snapshot.complete`
+completion marker written last. Restore targets must not already exist and
+must name different files. Cancellation is cooperative: pass a
+`threading.Event` and set it before or during the operation; progress handlers
+check it between backup page batches. See the [CLI
+reference](cli.md#offline-consistency-snapshot-commands) and
+[durability notes](durability.md#offline-consistency-snapshots).
 
 ## Manifest and Project Entrypoints
 

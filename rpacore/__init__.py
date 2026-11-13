@@ -60,6 +60,21 @@ from rpacore.recovery import resume_transaction
 from rpacore.report import ArtifactReport, OutcomeReport, ReportRecord, StepReport, TransactionReport, generate_report, render_html, render_json, render_text
 from rpacore.runner import QueueRunSummary, run_queue_loop
 from rpacore.serialization import TRANSACTION_FORMAT_VERSION, serialize_transaction
+from rpacore._snapshot import (
+    QueueLeaseState,
+    SnapshotDatabaseResult,
+    SnapshotRestoreResult,
+    SnapshotResult,
+    RestoredDatabase,
+    create_consistency_snapshot,
+    restore_consistency_snapshot,
+)
+from rpacore._snapshot_errors import (
+    SnapshotBusyError,
+    SnapshotCancelledError,
+    SnapshotError,
+    SnapshotVerificationError,
+)
 from rpacore.step import Step
 from rpacore.status import Status
 from rpacore.transaction import Artifact, HistoryEntry, HistoryEvent, Transaction
@@ -91,13 +106,22 @@ __all__ = [
     "QueueAttemptOutcome",
     "QueueItem",
     "QueueLeaseLostError",
+    "QueueLeaseState",
     "QueuePage",
     "QueuePoisonEvent",
     "QueueProvider",
     "QueueRunSummary",
     "QueueStatus",
     "ReportRecord",
+    "RestoredDatabase",
     "RetryDisposition",
+    "SnapshotBusyError",
+    "SnapshotCancelledError",
+    "SnapshotDatabaseResult",
+    "SnapshotError",
+    "SnapshotRestoreResult",
+    "SnapshotResult",
+    "SnapshotVerificationError",
     "SqliteQueue",
     "Status",
     "Step",
@@ -115,6 +139,7 @@ __all__ = [
     "build_credential_provider",
     "build_notifiers",
     "configure_logger",
+    "create_consistency_snapshot",
     "dispatch",
     "execute_transaction",
     "find_project_manifest",
@@ -138,6 +163,7 @@ __all__ = [
     "resolve_config_path",
     "resolve_config_paths",
     "resolve_project_entrypoint",
+    "restore_consistency_snapshot",
     "resume_transaction",
     "run_queue_loop",
     "save_transaction",

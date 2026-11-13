@@ -16,6 +16,7 @@ from rpacore._queue_admin_cli import _administer_queue
 from rpacore._queue_cli import _inspect_queue
 from rpacore._queue_read import QUERY_DEFAULT_LIMIT
 from rpacore._scaffold import _write_project_files
+from rpacore._snapshot_cli import _run_restore_command, _run_snapshot_command
 from rpacore._transaction_cli import _inspect_transactions
 from rpacore.doctor import collect_doctor_result
 from rpacore.manifest import load_project_manifest, resolve_project_entrypoint
@@ -139,6 +140,51 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser.add_argument("--config", dest="config_path", help="Configuration file path.")
     doctor_parser.add_argument("--json", action="store_true", help="Write JSON to stdout.")
 
+    snapshot_parser = subparsers.add_parser(
+        "snapshot",
+        help="Create or restore an offline consistent pair of database copies.",
+        description="Offline consistency snapshots of the separate transaction and queue databases.",
+    )
+    snapshot_subparsers = snapshot_parser.add_subparsers(
+        dest="snapshot_command",
+        required=True,
+    )
+    snapshot_create_parser = snapshot_subparsers.add_parser(
+        "create",
+        help="Back up both databases to one new snapshot directory.",
+    )
+    snapshot_create_parser.add_argument(
+        "--transaction-db", dest="transaction_db", required=True,
+        help="Existing transaction database path.",
+    )
+    snapshot_create_parser.add_argument(
+        "--queue-db", dest="queue_db", required=True,
+        help="Existing queue database path.",
+    )
+    snapshot_create_parser.add_argument(
+        "--output", dest="output", required=True,
+        help="New snapshot directory; must not already exist.",
+    )
+    snapshot_create_parser.add_argument("--json", action="store_true", help="Write JSON to stdout.")
+
+    snapshot_restore_parser = snapshot_subparsers.add_parser(
+        "restore",
+        help="Restore a snapshot into explicit new database paths.",
+    )
+    snapshot_restore_parser.add_argument(
+        "--snapshot-dir", dest="snapshot_dir", required=True,
+        help="Published snapshot directory containing the completion marker.",
+    )
+    snapshot_restore_parser.add_argument(
+        "--transaction-target", dest="transaction_target", required=True,
+        help="New transaction database path; must not already exist.",
+    )
+    snapshot_restore_parser.add_argument(
+        "--queue-target", dest="queue_target", required=True,
+        help="New queue database path; must not already exist.",
+    )
+    snapshot_restore_parser.add_argument("--json", action="store_true", help="Write JSON to stdout.")
+
     subparsers.add_parser("version", help="Print the installed RPA Core version.")
     return parser
 
@@ -163,6 +209,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _inspect_queue(args)
     if args.command == "doctor":
         return _run_doctor(args)
+    if args.command == "snapshot":
+        if args.snapshot_command == "create":
+            return _run_snapshot_command(args)
+        return _run_restore_command(args)
     parser.error(f"unknown command: {args.command}")
 
 

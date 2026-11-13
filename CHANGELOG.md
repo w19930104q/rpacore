@@ -6,6 +6,21 @@ All notable user-facing changes are recorded here.
 
 ### Added
 
+- Offline consistency snapshots pair the separate transaction and queue SQLite
+  databases at one logical point in time. `rpacore snapshot create` uses the
+  SQLite online backup API under write sentries that block commits on both
+  sources for the backup window, then publishes a self-contained directory
+  holding both normalized database copies, a versioned manifest with SHA-256
+  digests and verification facts, and a completion marker. `rpacore snapshot
+  restore` writes only to explicit new paths and verifies schema markers, row
+  counts, foreign keys, integrity and queue lease state against the manifest.
+  A busy source, cancellation, or any verification failure publishes nothing
+  and leaves existing files unchanged; restore never overwrites a target or
+  touches the original databases. Library functions
+  `create_consistency_snapshot` and `restore_consistency_snapshot` with their
+  result and exception types are exported from top-level `rpacore`. No schema
+  migration, new dependency, storage-interface change, or examples-repository
+  update is required.
 - `rpacore queue complete` and terminal `queue fail` wrap the existing audited
   overrides, requiring `--reason` and `--confirm` before storage access. They
   reuse queue storage selection and return schema-2 JSON acknowledgements or

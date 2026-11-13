@@ -141,6 +141,10 @@ inspection opens existing files read-only and refuses missing or incompatible
 schemas without migration. Queue databases use rollback journal on supported
 runtimes to avoid the documented SQLite WAL-reset race in affected embedded
 runtimes. Keep database and journal files together during backup and restore.
+For paired transaction and queue storage, prefer `rpacore snapshot create`,
+which blocks commits on both databases while taking same-point-in-time online
+backup copies and records SHA-256 digests plus a completion marker; restore
+only through `rpacore snapshot restore` to explicit new paths.
 
 Database paths are trusted operator configuration, not a filesystem sandbox.
 They may intentionally identify storage outside the project directory, subject

@@ -938,3 +938,83 @@ where practical.
 
 When loading persisted data, any `IN_PROGRESS` transaction or step remains
 visible as `IN_PROGRESS` until explicit recovery.
+
+## Offline Consistency Snapshots
+
+Transaction truth and queue truth are stored in two separate SQLite files
+after the split of transaction and queue storage. Copying the two files
+independently cannot promise a recoverable pair: a retry or lease renewal that
+commits in the gap between the two copies leaves transaction state and queue
+state at different logical points. Offline consistency snapshots close that
+gap without changing either storage schema.
+
+### Consistency window
+
+For each source database the snapshot holds two connections for the duration
+of the backup window:
+
+- A writable **sentry** connection parked in `BEGIN IMMEDIATE`. Its RESERVED
+  lock prevents any other connection from acquiring a write lock for the whole
+  window. The sentry writes no rows; it is released by rollback, so the source
+  database is not modified.
+- A separate **read-only** connection with an explicit pinned read
+  transaction. The SQLite online backup API copies this connection's snapshot.
+  The backup cannot run on the sentry connection itself because a held
+  RESERVED lock blocks the backup's own page-copy steps.
+
+A sentry is acquired on both files before either backup starts. With both
+locks held, no writer commit can land on either database while the pair is
+assembled. This holds in both rollback-journal and WAL mode; a read-only
+connection alone cannot block a WAL writer, which is why the writable sentry
+is part of the design rather than relying only on pinned reads. Sentry
+acquisition runs with `busy_timeout` disabled, so a database whose write lock
+is already held fails immediately as a busy error instead of waiting
+indefinitely. Online backup page-copy steps that still encounter
+`SQLITE_BUSY`/`SQLITE_LOCKED` are retried a bounded number of times through
+the backup progress handler and then raise a busy error.
+
+### Snapshot directory layout and publication
+
+Every snapshot is assembled in a temporary sibling directory and published
+with a single `os.replace` rename:
+
+- `transactions.db` and `queue.db`: online backup copies, normalized to
+  rollback-journal (`DELETE`) mode so the directory is self-contained without
+  `-wal`, `-shm`, or `-journal` sidecars.
+- `snapshot-manifest.json`: format version, creation timestamp, framework
+  version, completion-marker name, and one entry per database recording
+  component, source and snapshot file names, schema version, journal mode,
+  SHA-256 digest, byte size, per-table row counts, foreign-key violation
+  count, integrity-check result, and (for the queue) the captured lease state
+  (in-progress items, complete and incomplete claims, open attempts).
+- `snapshot.complete`: completion marker written last. A directory without
+  this marker is treated as incomplete and cannot be restored.
+
+If either database is busy, cancellation is requested, or any copy or
+verification step fails, the temporary directory is removed and no snapshot
+directory is published. An existing output path is never overwritten. Cached
+page content, checksums, and manifest facts are JSON-safe; no runtime handles
+are persisted.
+
+### Restore guarantees
+
+Restore writes only to explicit new target paths that do not already exist;
+the two targets must name different files. Before any target is written, the
+completion marker, manifest format version, component set, recorded digests
+and sizes, and absence of journal sidecars are verified. Each file is copied
+through a temporary sibling plus `os.replace`, then reopened to verify its
+schema marker, integrity result, foreign-key count, per-table row counts,
+journal mode, and (for the queue) lease facts against the manifest. A checksum
+mismatch or other verification failure aborts before publication and removes
+only the new files the restore created; the snapshot directory and the
+original live databases are never modified. A snapshot can be restored
+repeatedly to different target paths.
+
+### Compatibility
+
+Snapshots add no tables, columns, or schema migrations and introduce no new
+runtime dependency; they use the standard-library `sqlite3` online backup
+API. Existing CLI commands, export formats, and storage interfaces are
+unchanged. The snapshot manifest format and the CLI JSON envelope carry their
+own version `1`, independent of the database component schema versions
+(transactions `10`, queue `5`).

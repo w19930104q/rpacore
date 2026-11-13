@@ -466,3 +466,106 @@ unchanged. A missing/deleted ID or unavailable/incompatible database returns `1`
 with empty stdout; it never falls back to all records or a successful empty
 export. Both JSON and NDJSON retain export format v2. See the
 [Export Format Reference](export-format.md) for buffering and sensitive data.
+
+## Offline Consistency Snapshot Commands
+
+The separate transaction and queue databases must be copied as one logical
+point in time; copying the two files independently can leave the pair
+unrecoverable when a retry or lease renewal commits between the copies. The
+`snapshot` commands use the SQLite online backup mechanism under a write lock
+that blocks commits on both sources for the backup window, then verify every
+copy. They require explicit paths and never infer a working database, so a
+snapshot cannot silently target the wrong storage.
+
+### `rpacore snapshot create`
+
+```
+rpacore snapshot create --transaction-db PATH --queue-db PATH --output PATH [--json]
+```
+
+Creates a new snapshot directory containing same-point-in-time copies of both
+databases, a versioned `snapshot-manifest.json`, and a `snapshot.complete`
+completion marker. `--output` must not already exist; its parent directory
+must exist. All files are assembled in a temporary sibling directory and
+renamed into place only after integrity, foreign-key, schema, and SHA-256
+checks pass. If either database is busy, or any copy or verification fails, no
+snapshot directory is published and every existing file stays unchanged.
+Published database copies are normalized to rollback-journal mode, so the
+directory has no `-wal` or `-shm` sidecars. The source databases are opened
+for backup but never modified.
+
+### `rpacore snapshot restore`
+
+```
+rpacore snapshot restore --snapshot-dir PATH --transaction-target PATH --queue-target PATH [--json]
+```
+
+Restores a published snapshot to two explicit new database paths. Neither
+target may already exist and the two paths must differ, so an original live
+database can never be overwritten. The completion marker, manifest format
+version, recorded digests, and absence of journal sidecars are verified before
+any target is written; each restored file is then reopened to verify its
+schema marker, table row counts, foreign-key state, integrity result, and (for
+the queue) lease facts. A failure removes only the new files this call
+created and never writes to the original databases. A snapshot can be restored
+repeatedly to different target paths.
+
+Exit codes for both commands:
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Snapshot published or restore completed and verified. |
+| `1` | Runtime failure: busy or locked source, verification failure, missing source, incomplete snapshot, or existing target. Diagnostics are written to stderr; no half set is published. |
+| `2` | Usage error: a required flag or subcommand is missing. Argparse reports the error to stderr. |
+
+Human output lists each component with its schema version, size, and digest.
+With `--json`, machine-readable output goes to stdout and diagnostics stay on
+stderr. The envelope is independently versioned at `schema_version: 1`:
+
+```json
+{
+  "schema_version": 1,
+  "command": "snapshot:create",
+  "format_version": 1,
+  "snapshot_dir": "/backups/pair-2026-11-13",
+  "created_at": "2026-11-13T10:00:00+00:00",
+  "databases": [
+    {
+      "component": "transactions",
+      "source_path": "/data/rpacore.db",
+      "snapshot_file": "transactions.db",
+      "schema_version": 10,
+      "journal_mode": "delete",
+      "sha256": "…",
+      "size_bytes": 24576,
+      "row_counts": {"transactions": 12},
+      "foreign_key_violations": 0,
+      "integrity_check": "ok"
+    },
+    {
+      "component": "queue",
+      "source_path": "/data/queue.db",
+      "snapshot_file": "queue.db",
+      "schema_version": 5,
+      "journal_mode": "delete",
+      "sha256": "…",
+      "size_bytes": 20480,
+      "row_counts": {"queue_items": 4},
+      "foreign_key_violations": 0,
+      "integrity_check": "ok",
+      "lease": {
+        "in_progress_items": 1,
+        "complete_claims": 1,
+        "incomplete_claims": 0,
+        "open_attempts": 1
+      }
+    }
+  ]
+}
+```
+
+The restore envelope uses `command: "snapshot:restore"` with `restored_at`
+instead of `created_at`/`format_version`; each database entry carries its
+target `path` and the same verification fields, including the queue `lease`.
+The snapshot manifest format and the CLI JSON envelope are separate versions;
+both are currently version `1`.
